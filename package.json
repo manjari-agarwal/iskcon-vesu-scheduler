@@ -1,0 +1,18 @@
+{
+  "name": "iskcon-festival-scheduler-func",
+  "version": "1.0.0",
+  "private": true,
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "func start",
+    "lint": "node -c src/index.js"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.11.0",
+    "@azure/storage-blob": "^12.30.0",
+    "dotenv": "^17.2.3",
+    "firebase-admin": "^12.1.0",
+    "mongoose": "^8.6.0"
+  }
+}

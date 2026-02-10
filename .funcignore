@@ -1,0 +1,39 @@
+local.settings.json
+
+# Node / local
+node_modules
+npm-debug.log
+yarn.lock
+
+# Local-only scripts
+src/localNow.js
+src/runLocalNow.js
+
+# Logs / dumps
+*.log
+logs/
+dump/
+backups/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Tests
+__tests__/
+tests/
+*.spec.js
+
+# Env files (IMPORTANT)
+.env
+.env.*
+
+# Git
+.git/
+.gitignore
+
+# Docs
+README.md
+docs/
