@@ -57,7 +57,7 @@ async function runFestivalsToday630am(context) {
   }
 
 app.timer("festivalsToday630am", {
-  schedule: "0 30 6 * * *", // 6:30 AM IST = 00:30 UTC
+  schedule: "0 20 7 * * *", // 6:30 AM IST = 00:30 UTC
   handler: async (_timer, context) => runFestivalsToday630am(context),
 });
 
