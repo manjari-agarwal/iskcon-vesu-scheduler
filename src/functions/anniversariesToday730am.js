@@ -8,121 +8,282 @@ const { getAdmin } = require("../config/firebase");
 const { sendFestivalsTopicNotification } = require("../utils/fcmFunctions");
 
 // ---- helpers ----
+function safeStr(s) {
+  return String(s || "").trim();
+}
+
 function monthDayKeyFromDate(d) {
-    if (!d) return "";
-    const ymd = istYmd(new Date(d)); // IST aligned YYYY-MM-DD
-    const [, mm, dd] = ymd.split("-");
-    return `${mm}-${dd}`;
+  if (!d) return "";
+  const ymd = istYmd(new Date(d));
+  const [, mm, dd] = ymd.split("-");
+  return `${mm}-${dd}`;
 }
 
 function formatNames(devotees, limit = 8) {
-    const names = devotees.map(d => d.initiationName || d.name).filter(Boolean);
-    const shown = names.slice(0, limit);
-    const more = names.length - shown.length;
-    return more > 0 ? `${shown.join(", ")} +${more} more` : shown.join(", ");
+  const names = devotees.map(d => d.initiationName || d.name).filter(Boolean);
+  const shown = names.slice(0, limit);
+  const more = names.length - shown.length;
+  return more > 0 ? `${shown.join(", ")} +${more} more` : shown.join(", ");
 }
 
 async function sendToToken(admin, token, title, body, data = {}) {
-    if (!token) return null;
-    return admin.messaging().send({
-        token,
-        notification: { title, body },
-        data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v ?? "")])),
+  if (!token) return { ok: false, skipped: true, reason: "no_token" };
+
+  try {
+    const messageId = await admin.messaging().send({
+      token,
+      notification: { title, body },
+      data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v ?? "")])),
+      android: { notification: { channelId: "default" } },
     });
+    return { ok: true, messageId };
+  } catch (err) {
+    return {
+      ok: false,
+      errorCode: err?.code,
+      errorMessage: err?.message || String(err),
+    };
+  }
 }
 
-async function runAnniversariesToday730am(context) {
-    const ok = await ensureMongo(context);
-    if (!ok) {
-        context.log("❌ Skipping run because Mongo is not connected.");
-        return;
+/**
+ * ✅ Always upsert a run summary doc (ONE per day per slot)
+ */
+async function upsertRunSummary({ todayYmd, slot, stats, details, context }) {
+  const log = (...a) => (context?.log ? context.log(...a) : console.log(...a));
+
+  const key = {
+    type: "anniversary_run",
+    topic: "festivals",
+    slot,
+    eventDate: todayYmd,
+    event: "summary",
+  };
+
+  try {
+    await NotificationLog.findOneAndUpdate(
+      key,
+      {
+        $set: {
+          ...key,
+          status: "completed",
+          stats,
+          details,
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    log("[SUMMARY] ✅ Upserted anniversary_run summary");
+  } catch (e) {
+    log("[SUMMARY] ❌ Failed to upsert anniversary_run summary:", e?.message || e);
+  }
+}
+
+async function runAnniversariesToday730am(context, opts = {}) {
+  const log = (...a) => (context?.log ? context.log(...a) : console.log(...a));
+  const warn = (...a) => (context?.log ? context.log(...a) : console.warn(...a));
+
+  const slot = "today_730am";
+
+  const forcedYmd = safeStr(opts.forceYmd);
+  const todayYmd = forcedYmd || istYmd(new Date());
+  const [, mm, dd] = todayYmd.split("-");
+  const todayKey = `${mm}-${dd}`;
+
+  const startedAt = new Date().toISOString();
+
+  log("========== ANNIVERSARY JOB START ==========");
+  log("IST date:", todayYmd, "todayKey:", todayKey, "slot:", slot, "force?", !!forcedYmd);
+
+  const stats = {
+    date: todayYmd,
+    mongoOk: false,
+    totalCandidates: 0,
+    todaysCount: 0,
+    topic: { sent: 0, failed: 0, skippedAlready: 0, skippedNoAnniversaries: 0 },
+    personal: { sent: 0, failed: 0, skippedNoToken: 0, skippedAlready: 0, skippedNoMobile: 0 },
+    startedAt,
+    endedAt: null,
+  };
+
+  const details = []; // keep it as array so it’s easy to read
+
+  const mongoOk = await ensureMongo(context);
+  if (!mongoOk) {
+    warn("❌ Mongo not connected. Exiting.");
+
+    stats.mongoOk = false;
+    stats.endedAt = new Date().toISOString();
+    details.push({ step: "mongo", status: "failed" });
+
+    // ✅ Always save summary even if mongo fails
+    await upsertRunSummary({ todayYmd, slot, stats, details, context });
+    return;
+  }
+
+  stats.mongoOk = true;
+
+  const admin = await getAdmin();
+
+  const devotees = await Devotee.find(
+    { dateOfMarriage: { $ne: null } },
+    { name: 1, mobileNo: 1, dateOfMarriage: 1, initiationName: 1 }
+  ).lean();
+
+  stats.totalCandidates = devotees.length;
+
+  const todaysAnniversaries = devotees.filter(d => monthDayKeyFromDate(d.dateOfMarriage) === todayKey);
+  stats.todaysCount = todaysAnniversaries.length;
+
+  log("Devotees with marriage date:", devotees.length);
+  log("Today's anniversaries:", todaysAnniversaries.length);
+
+  details.push({
+    step: "candidates",
+    status: "ok",
+    totalCandidates: devotees.length,
+    todaysCount: todaysAnniversaries.length,
+    todaysList: todaysAnniversaries.map(d => ({
+      name: d.initiationName || d.name,
+      mobileNo: d.mobileNo || null,
+    })),
+  });
+
+  // -------------------------
+  // 1) TOPIC SUMMARY
+  // -------------------------
+  if (!todaysAnniversaries.length) {
+    stats.topic.skippedNoAnniversaries += 1;
+    details.push({ step: "topic", status: "skipped_no_anniversaries" });
+  } else {
+    const key = {
+      type: "anniversary",
+      topic: "festivals",
+      slot,
+      eventDate: todayYmd,
+      event: "summary",
+    };
+
+    const already = await NotificationLog.findOne(key).lean();
+    log("Topic already sent?", !!already);
+
+    if (already) {
+      stats.topic.skippedAlready += 1;
+      details.push({ step: "topic", status: "skipped_already_sent", messageId: already.messageId || null });
+    } else {
+      const count = todaysAnniversaries.length;
+      const namesText = formatNames(todaysAnniversaries, 8);
+
+      const title = "🎉 Today: Wedding Anniversaries (ISKCON Vesu)";
+      const body = `(${count}) ${namesText}`;
+
+      log("[TOPIC] Sending:", { title, body });
+
+      try {
+        const messageId = await sendFestivalsTopicNotification({
+          title,
+          body,
+          data: { type: "anniversary", slot, date: todayYmd, count },
+        });
+
+        await NotificationLog.create({ ...key, status: "sent", messageId });
+        stats.topic.sent += 1;
+        details.push({ step: "topic", status: "sent", messageId });
+        log("[TOPIC] ✅ Sent:", messageId);
+      } catch (err) {
+        const emsg = err?.message || String(err);
+        await NotificationLog.create({ ...key, status: "failed", error: emsg }).catch(() => {});
+        stats.topic.failed += 1;
+        details.push({ step: "topic", status: "failed", error: emsg });
+        warn("[TOPIC] ❌ Failed:", emsg);
+      }
     }
-    const admin = await getAdmin();
+  }
 
-    const todayYmd = istYmd(new Date());
-    const [, mm, dd] = todayYmd.split("-");
-    const todayKey = `${mm}-${dd}`;
+  // -------------------------
+  // 2) PERSONAL
+  // -------------------------
+  const mobiles = todaysAnniversaries.map(d => safeStr(d.mobileNo)).filter(Boolean);
 
-    const devotees = await Devotee.find(
-        { dateOfMarriage: { $ne: null } },
-        { name: 1, mobileNo: 1, dateOfMarriage: 1, initiationName: 1 }
-    ).lean();
+  const logins = mobiles.length
+    ? await Login.find({ mobile: { $in: mobiles } }, { mobile: 1, fcmToken: 1 }).lean()
+    : [];
 
-    const todaysAnniversaries = devotees.filter(d => monthDayKeyFromDate(d.dateOfMarriage) === todayKey);
+  const tokenMap = new Map(logins.map(l => [safeStr(l.mobile), safeStr(l.fcmToken)]));
+  const loginMobileSet = new Set(logins.map(l => safeStr(l.mobile)));
 
-    // ---- 1) TOPIC summary (single send)
-    if (todaysAnniversaries.length) {
-        const key = {
-            type: "anniversary",
-            topic: "festivals",
-            slot: "today_730am",
-            eventDate: todayYmd,
-            event: "summary",
-        };
+  const missingInLogin = mobiles.filter(m => !loginMobileSet.has(m));
+  if (missingInLogin.length) {
+    details.push({ step: "personal", status: "missing_login_rows", mobiles: missingInLogin });
+  }
 
-        const already = await NotificationLog.findOne(key).lean();
-        if (!already) {
-            const count = todaysAnniversaries.length;
-            const namesText = formatNames(todaysAnniversaries, 8);
-
-            const title = "🎉 Today: Wedding Anniversaries (ISKCON Vesu)";
-            const body = `(${count}) ${namesText}`;
-
-            try {
-                const messageId = await sendFestivalsTopicNotification({
-                    title,
-                    body,
-                    data: { type: "anniversary", slot: "today_730am", date: todayYmd, count }
-                });
-
-                await NotificationLog.create({ ...key, status: "sent", messageId });
-                context.log("[FCM] anniversary summary sent:", messageId);
-            } catch (err) {
-                await NotificationLog.create({ ...key, status: "failed", error: err?.message || String(err) }).catch(() => { });
-                context.log("[FCM] anniversary summary failed:", err?.message || err);
-            }
-        }
+  for (const d of todaysAnniversaries) {
+    const mobile = safeStr(d.mobileNo);
+    if (!mobile) {
+      stats.personal.skippedNoMobile += 1;
+      details.push({ step: "personal", status: "skipped_no_mobile", name: d.initiationName || d.name });
+      continue;
     }
 
-    // ---- 2) PERSONAL wishes
-    // Map mobile -> fcmToken from Login collection
-    const mobiles = todaysAnniversaries.map(d => d.mobileNo).filter(Boolean);
-    const logins = await Login.find({ mobile: { $in: mobiles } }, { mobile: 1, fcmToken: 1 }).lean();
-    const tokenMap = new Map(logins.map(l => [l.mobile, l.fcmToken]));
-
-    for (const d of todaysAnniversaries) {
-        const token = tokenMap.get(d.mobileNo);
-        if (!token) continue;
-
-        const displayName = d.initiationName || d.name || "Devotee";
-
-        const key = {
-            type: "anniversary_personal",
-            topic: "token",
-            slot: "today_730am",
-            eventDate: todayYmd,
-            event: d.mobileNo, // unique per person
-        };
-
-        const already = await NotificationLog.findOne(key).lean();
-        if (already) continue;
-
-        try {
-            const title = "Hare Krishna 🙏";
-            const body = `Happy Wedding Anniversary ${displayName}! 🎂`;
-
-            await sendToToken(admin, token, title, body, { type: "anniversary", date: todayYmd });
-
-            await NotificationLog.create({ ...key, status: "sent", messageId: "token_send" });
-        } catch (err) {
-            await NotificationLog.create({ ...key, status: "failed", error: err?.message || String(err) }).catch(() => { });
-        }
+    const token = tokenMap.get(mobile);
+    if (!token) {
+      stats.personal.skippedNoToken += 1;
+      details.push({ step: "personal", status: "skipped_no_token", mobile });
+      continue;
     }
+
+    const key = {
+      type: "anniversary_personal",
+      topic: "token",
+      slot,
+      eventDate: todayYmd,
+      event: mobile,
+    };
+
+    const already = await NotificationLog.findOne(key).lean();
+    if (already) {
+      stats.personal.skippedAlready += 1;
+      details.push({ step: "personal", status: "skipped_already_sent", mobile });
+      continue;
+    }
+
+    const displayName = d.initiationName || d.name || "Devotee";
+    const title = "Hare Krishna 🙏";
+    const body = `Happy Wedding Anniversary ${displayName}! 🎉`;
+
+    const res = await sendToToken(admin, token, title, body, { type: "anniversary", date: todayYmd });
+
+    if (res.ok) {
+      stats.personal.sent += 1;
+      await NotificationLog.create({ ...key, status: "sent", messageId: res.messageId });
+      details.push({ step: "personal", status: "sent", mobile, messageId: res.messageId });
+    } else {
+      stats.personal.failed += 1;
+      const emsg = `${res.errorCode || ""} ${res.errorMessage || ""}`.trim();
+      await NotificationLog.create({ ...key, status: "failed", error: emsg }).catch(() => {});
+      details.push({ step: "personal", status: "failed", mobile, error: emsg });
+
+      const code = String(res.errorCode || "");
+      if (code.includes("registration-token-not-registered") || code.includes("invalid-registration-token")) {
+        await Login.updateOne({ mobile }, { $set: { fcmToken: null } }).catch(() => {});
+        details.push({ step: "personal", status: "token_cleared", mobile });
+      }
+    }
+  }
+
+  stats.endedAt = new Date().toISOString();
+
+  // ✅ ALWAYS save run summary
+  await upsertRunSummary({ todayYmd, slot, stats, details, context });
+
+  log("========== ANNIVERSARY JOB DONE ==========");
+  log("Summary:", stats);
 }
 
 app.timer("anniversariesToday730am", {
-    schedule: "0 55 7 * * *", // ✅ 7:30 AM IST
-    handler: async (_timer, context) => runAnniversariesToday730am(context),
+  schedule: "0 0 2 * * *", // ✅ 7:30 AM IST
+  handler: async (_timer, context) => runAnniversariesToday730am(context),
 });
 
 module.exports = { runAnniversariesToday730am };
