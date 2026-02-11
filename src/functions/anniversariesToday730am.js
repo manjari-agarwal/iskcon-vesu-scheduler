@@ -121,7 +121,7 @@ async function runAnniversariesToday730am(context) {
 }
 
 app.timer("anniversariesToday730am", {
-    schedule: "0 10 7 * * *", // ✅ 7:30 AM IST
+    schedule: "0 55 7 * * *", // ✅ 7:30 AM IST
     handler: async (_timer, context) => runAnniversariesToday730am(context),
 });
 
