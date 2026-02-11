@@ -32,7 +32,11 @@ async function sendToToken(admin, token, title, body, data = {}) {
 }
 
 async function runAnniversariesToday730am(context) {
-    await ensureMongo();
+    const ok = await ensureMongo(context);
+    if (!ok) {
+        context.log("❌ Skipping run because Mongo is not connected.");
+        return;
+    }
     const admin = await getAdmin();
 
     const todayYmd = istYmd(new Date());
@@ -117,7 +121,7 @@ async function runAnniversariesToday730am(context) {
 }
 
 app.timer("anniversariesToday730am", {
-    schedule: "0 55 5 * * *", // ✅ 7:30 AM IST
+    schedule: "0 20 6 * * *", // ✅ 7:30 AM IST
     handler: async (_timer, context) => runAnniversariesToday730am(context),
 });
 

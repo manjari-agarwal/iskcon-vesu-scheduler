@@ -16,7 +16,11 @@ async function getEventsForIstDate(targetYmd) {
 app.timer("festivalsTomorrow5pm", {
   schedule: "0 30 11 * * *", // 5:00 PM IST = 11:30 UTC
   handler: async (_timer, context) => {
-    await ensureMongo();
+    const ok = await ensureMongo(context);
+    if (!ok) {
+        context.log("❌ Skipping run because Mongo is not connected.");
+        return;
+    }
 
     const today = istYmd(new Date());
     const tomorrow = addDaysYmd(today, 1);

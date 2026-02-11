@@ -14,7 +14,11 @@ async function getEventsForIstDate(targetYmd) {
 }
 
 async function runFestivalsToday630am(context) {
-    await ensureMongo();
+    const ok = await ensureMongo(context);
+    if (!ok) {
+        context.log("❌ Skipping run because Mongo is not connected.");
+        return;
+    }
 
     const today = istYmd(new Date());
     const events = await getEventsForIstDate(today);
@@ -53,7 +57,7 @@ async function runFestivalsToday630am(context) {
   }
 
 app.timer("festivalsToday630am", {
-  schedule: "0 30 0 * * *", // 6:30 AM IST = 00:30 UTC
+  schedule: "0 30 6 * * *", // 6:30 AM IST = 00:30 UTC
   handler: async (_timer, context) => runFestivalsToday630am(context),
 });
 

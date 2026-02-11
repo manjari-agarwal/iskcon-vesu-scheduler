@@ -1,35 +1,88 @@
+// src/config/mongo.js
 const mongoose = require("mongoose");
 
-let connecting = null;
+let connectingPromise = null;
 
-const ensureMongo = async () => {
+// Optional: tune these if you want
+const DEFAULT_TIMEOUT_MS = 15000;
+
+async function ensureMongo(context) {
   try {
-    // Already connected
+    const uri = process.env.MONGO_URI;
+
+    if (!uri) {
+      const msg = "❌ MONGO_URI is missing in environment variables.";
+      (context?.log || console.error)(msg);
+      return false;
+    }
+
+    // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
     if (mongoose.connection.readyState === 1) return true;
 
-    // If connection in progress, await it
-    if (connecting) return await connecting;
+    // If connect already in progress, wait for it
+    if (connectingPromise) return await connectingPromise;
 
-    connecting = mongoose
-      .connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 15000 })
+    const opts = {
+      serverSelectionTimeoutMS: DEFAULT_TIMEOUT_MS,
+      connectTimeoutMS: DEFAULT_TIMEOUT_MS,
+      socketTimeoutMS: 60000,
+
+      // Cosmos/Mongo clusters are TLS; URI already has tls=true but keep this explicit
+      tls: true,
+
+      // vCore + many Cosmos Mongo setups work best with retryWrites disabled
+      retryWrites: false,
+
+      // Keep connections stable in Functions
+      maxPoolSize: 5,
+      minPoolSize: 0,
+      maxIdleTimeMS: 120000,
+      heartbeatFrequencyMS: 10000,
+    };
+
+    connectingPromise = mongoose
+      .connect(uri, opts)
       .then(() => {
-        console.log("✅ MongoDB connected");
-        console.log("DB:", mongoose.connection.name);
+        (context?.log || console.log)("✅ MongoDB connected");
+        (context?.log || console.log)("DB:", mongoose.connection.name);
         return true;
       })
       .catch((err) => {
-        console.error("❌ MongoDB connect failed:", err.message);
+        // Useful extra info for DNS/firewall issues
+        const extra =
+          err?.code ? ` (code=${err.code})` : "";
+        (context?.log || console.error)(
+          `❌ MongoDB connect failed: ${err?.message || err}${extra}`
+        );
         return false;
       })
       .finally(() => {
-        connecting = null;
+        connectingPromise = null;
       });
 
-    return await connecting;
+    return await connectingPromise;
   } catch (err) {
-    console.error("❌ Mongo ensure failed:", err?.message || err);
+    (context?.log || console.error)(
+      "❌ Mongo ensure failed:",
+      err?.message || err
+    );
     return false;
   }
-};
+}
 
-module.exports = { ensureMongo };
+// Optional: close (useful for local scripts/tests; not usually needed in Azure Functions)
+async function closeMongo(context) {
+  try {
+    if (mongoose.connection.readyState === 1) {
+      await mongoose.disconnect();
+      (context?.log || console.log)("✅ MongoDB disconnected");
+    }
+  } catch (err) {
+    (context?.log || console.error)(
+      "❌ Mongo disconnect failed:",
+      err?.message || err
+    );
+  }
+}
+
+module.exports = { ensureMongo, closeMongo };
