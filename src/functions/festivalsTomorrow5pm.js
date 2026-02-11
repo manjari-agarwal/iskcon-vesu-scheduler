@@ -1,6 +1,6 @@
 const { app } = require("@azure/functions");
 const VaishnavaCalender = require("../models/VaishnavaCalender");
-const NotificationLog = require("../models/notificationLog");
+const NotificationLog = require("../models/notificationLogs");
 const { ensureMongo } = require("../config/mongo");
 const { istYmd, addDaysYmd } = require("../utils/dateIst");
 const { sendFestivalTopicNotification } = require("../utils/fcmFunctions");
