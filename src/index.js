@@ -1,6 +1,13 @@
-// Register all functions
-require("./functions/festivalsTomorrow5pm");
-require("./functions/festivalsToday630am");
-require("./functions/anniversariesToday730am");
-require("./functions/birthdaysToday7am");
-// ... add more function registrations as needed
+function safeRequire(path) {
+  try {
+    require(path);
+    console.log("[OK] Loaded", path);
+  } catch (e) {
+    console.error("[FAIL] Could not load", path, e?.message || e);
+  }
+}
+
+safeRequire("./functions/festivalsTomorrow5pm");
+safeRequire("./functions/festivalsToday630am");
+safeRequire("./functions/anniversariesToday730am");
+safeRequire("./functions/birthdaysToday7am");
