@@ -19,21 +19,38 @@ function monthDayKeyFromDate(d) {
   return `${mm}-${dd}`;
 }
 
-function formatNames(devotees, limit = 8) {
-  const names = devotees.map(d => d.initiationName || d.name).filter(Boolean);
+function formatNames(people, limit = 8) {
+  const names = people
+    .map((d) => safeStr(d?.name) || safeStr(d?.initiationName))
+    .filter(Boolean);
   const shown = names.slice(0, limit);
   const more = names.length - shown.length;
   return more > 0 ? `${shown.join(", ")} +${more} more` : shown.join(", ");
 }
 
+// Devotee display name (adds Prabhuji/Mataji based on gender)
 function pickDisplayName(p) {
-  return safeStr(p.initiationName) || safeStr(p.name) || "Devotee";
+  const init = `${safeStr(p?.initiationName)} ${safeStr(p?.initiationTitle)}`.trim();
+  const base = init || safeStr(p?.name) || "Devotee";
+
+  const g = safeStr(p?.gender).toLowerCase();
+  if (g === "female") return `${base} Mataji`;
+  if (g === "male") return `${base} Prabhuji`;
+
+  return base;
 }
 
-function makeKeyFromMobileOrName(mobile, name) {
+// Spouse/Child display name (NO Prabhuji/Mataji)
+function pickFamilyDisplayName(p) {
+  const init = `${safeStr(p?.initiationName)} ${safeStr(p?.initiationTitle)}`.trim();
+  return init || safeStr(p?.name) || "Devotee";
+}
+
+function makeKeyFromMobileOrName(mobile, name, mmdd = "") {
   const m = safeStr(mobile);
   if (m) return `m:${m}`;
-  return `n:${safeStr(name).toLowerCase()}`;
+  const n = safeStr(name).toLowerCase();
+  return `n:${n}:${mmdd}`;
 }
 
 /**
@@ -46,7 +63,9 @@ async function sendToToken(admin, token, title, body, data = {}) {
     const messageId = await admin.messaging().send({
       token,
       notification: { title, body },
-      data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v ?? "")])),
+      data: Object.fromEntries(
+        Object.entries(data).map(([k, v]) => [k, String(v ?? "")])
+      ),
       android: { notification: { channelId: "default" } },
     });
     return { ok: true, messageId };
@@ -132,9 +151,11 @@ async function runBirthdaysToday7am(context, opts = {}) {
     { dateOfBirth: { $ne: null } },
     {
       name: 1,
+      gender: 1,
       mobileNo: 1,
       dateOfBirth: 1,
       initiationName: 1,
+      initiationTitle: 1,
       spouseDetails: 1,
       childrenDetails: 1,
     }
@@ -142,82 +163,152 @@ async function runBirthdaysToday7am(context, opts = {}) {
 
   log("Devotees loaded:", devotees.length);
 
-  const devoteeMobiles = new Set(devotees.map(d => safeStr(d.mobileNo)).filter(Boolean));
+  // ---------- helpers (for standalone detection) ----------
+  const toYmd = (d) => {
+    if (!d) return "";
+    const dt = new Date(d);
+    if (isNaN(dt)) return "";
+    return dt.toISOString().slice(0, 10);
+  };
 
-  const loginMobiles = await Login.find(
-    { mobile: { $in: Array.from(devoteeMobiles) } },
-    { mobile: 1 }
-  ).lean();
+  const norm = (s = "") => String(s).trim().toLowerCase();
 
-  const registeredMobiles = new Set([
-    ...devoteeMobiles,
-    ...loginMobiles.map(l => safeStr(l.mobile)).filter(Boolean),
-  ]);
+  const buildInitiatedName = (x) =>
+    `${x?.initiationName || ""} ${x?.initiationTitle || ""}`.trim();
 
-  // build people list (devotee + spouse/children if not registered)
+  // Build lookup maps of real devotees (to detect spouse/child already exists)
+  const devoteeByMobile = new Map();
+  const devoteeByNameDob = new Map();
+
+  for (const d of devotees) {
+    const m = safeStr(d.mobileNo);
+    const dobYmd = toYmd(d.dateOfBirth);
+    const n1 = norm(d.name);
+    const n2 = norm(buildInitiatedName(d));
+
+    if (m) devoteeByMobile.set(m, d);
+
+    if (dobYmd) {
+      if (n2) devoteeByNameDob.set(`${n2}|${dobYmd}`, d);
+      if (n1) devoteeByNameDob.set(`${n1}|${dobYmd}`, d);
+    }
+  }
+
+  const existsAsDevotee = ({ mobileNo, name, initiationName, dob }) => {
+    const dobYmd = toYmd(dob);
+    const m = safeStr(mobileNo);
+    if (m && devoteeByMobile.has(m)) return true;
+
+    const ini = norm(initiationName);
+    if (ini && dobYmd && devoteeByNameDob.has(`${ini}|${dobYmd}`)) return true;
+
+    const n = norm(name);
+    if (n && dobYmd && devoteeByNameDob.has(`${n}|${dobYmd}`)) return true;
+
+    return false;
+  };
+
+  // ---------- build people list ----------
   const people = [];
   const added = new Set();
 
+  // collect spouse/child candidates for today (to check in Login once)
+  const familyCandidates = [];
+
+  // 1) SELF birthdays (always included)
   for (const d of devotees) {
     if (monthDayKeyFromDate(d.dateOfBirth) !== todayKey) continue;
 
-    const displayName = pickDisplayName(d);
-    const uniqueKey = makeKeyFromMobileOrName(d.mobileNo, displayName);
+    const displayName = pickDisplayName(d); // ✅ includes Prabhuji/Mataji
+    const uniqueKey = makeKeyFromMobileOrName(d.mobileNo, displayName, todayKey);
     if (added.has(uniqueKey)) continue;
 
     people.push({
-      name: displayName,
-      initiationName: safeStr(d.initiationName),
+      name: displayName, // final display name (already has Prabhuji/Mataji)
+      initiationName: buildInitiatedName(d),
       mobileNo: safeStr(d.mobileNo),
+      gender: safeStr(d.gender),
       source: "devotee",
       parentMobileNo: safeStr(d.mobileNo),
     });
     added.add(uniqueKey);
   }
 
+  // 2) Collect spouse/child candidates for today
   for (const d of devotees) {
+    const parentMobile = safeStr(d.mobileNo);
+
+    // spouse
     const sp = d.spouseDetails;
     if (sp?.dateOfBirth && monthDayKeyFromDate(sp.dateOfBirth) === todayKey) {
-      const spMobile = safeStr(sp.mobileNo);
-      const spName = pickDisplayName(sp);
-
-      if (!spMobile || !registeredMobiles.has(spMobile)) {
-        const uniqueKey = makeKeyFromMobileOrName(spMobile, spName);
-        if (!added.has(uniqueKey)) {
-          people.push({
-            name: spName,
-            initiationName: safeStr(sp.initiationName),
-            mobileNo: spMobile,
-            source: "spouse",
-            parentMobileNo: safeStr(d.mobileNo),
-          });
-          added.add(uniqueKey);
-        }
-      }
+      familyCandidates.push({
+        relation: "spouse",
+        parentMobileNo: parentMobile,
+        dateOfBirth: sp.dateOfBirth,
+        name: pickFamilyDisplayName(sp), // ✅ NO Prabhuji/Mataji
+        initiationName: buildInitiatedName(sp),
+        mobileNo: safeStr(sp.mobileNo),
+      });
     }
 
+    // children
     const kids = Array.isArray(d.childrenDetails) ? d.childrenDetails : [];
     for (const c of kids) {
       if (!c?.dateOfBirth) continue;
       if (monthDayKeyFromDate(c.dateOfBirth) !== todayKey) continue;
 
-      const cMobile = safeStr(c.mobileNo);
-      const cName = pickDisplayName(c);
-
-      if (!cMobile || !registeredMobiles.has(cMobile)) {
-        const uniqueKey = makeKeyFromMobileOrName(cMobile, cName);
-        if (!added.has(uniqueKey)) {
-          people.push({
-            name: cName,
-            initiationName: safeStr(c.initiationName),
-            mobileNo: cMobile,
-            source: "child",
-            parentMobileNo: safeStr(d.mobileNo),
-          });
-          added.add(uniqueKey);
-        }
-      }
+      familyCandidates.push({
+        relation: "child",
+        parentMobileNo: parentMobile,
+        dateOfBirth: c.dateOfBirth,
+        name: pickFamilyDisplayName(c), // ✅ NO Prabhuji/Mataji
+        initiationName: buildInitiatedName(c),
+        mobileNo: safeStr(c.mobileNo),
+      });
     }
+  }
+
+  // 3) Check which family candidates are standalone registered users (Devotee or Login)
+  const familyMobiles = Array.from(
+    new Set(familyCandidates.map((x) => safeStr(x.mobileNo)).filter(Boolean))
+  );
+
+  const loginRowsForFamily = familyMobiles.length
+    ? await Login.find({ mobile: { $in: familyMobiles } }, { mobile: 1 }).lean()
+    : [];
+
+  const familyMobileInLogin = new Set(
+    loginRowsForFamily.map((r) => safeStr(r.mobile)).filter(Boolean)
+  );
+
+  // 4) Add spouse/child only if NOT registered as devotee AND NOT registered in login
+  for (const fc of familyCandidates) {
+    const m = safeStr(fc.mobileNo);
+
+    // If spouse/child has no mobile -> include (cannot be standalone Login user)
+    // If has mobile and exists as Devotee OR exists in Login -> skip
+    const isStandaloneRegistered =
+      existsAsDevotee({
+        mobileNo: m,
+        name: fc.name,
+        initiationName: fc.initiationName,
+        dob: fc.dateOfBirth,
+      }) || (m && familyMobileInLogin.has(m));
+
+    if (isStandaloneRegistered) continue;
+
+    const uniqueKey = makeKeyFromMobileOrName(m, fc.name, todayKey);
+    if (added.has(uniqueKey)) continue;
+
+    people.push({
+      name: fc.name,
+      initiationName: safeStr(fc.initiationName),
+      mobileNo: m,
+      source: fc.relation, // "spouse" or "child"
+      parentMobileNo: safeStr(fc.parentMobileNo),
+    });
+
+    added.add(uniqueKey);
   }
 
   log("Birthdays people found:", people.length);
@@ -264,7 +355,9 @@ async function runBirthdaysToday7am(context, opts = {}) {
         log("[TOPIC] ✅ Sent:", messageId);
       } catch (err) {
         const emsg = err?.message || String(err);
-        await NotificationLog.create({ ...topicKey, status: "failed", error: emsg }).catch(() => {});
+        await NotificationLog.create({ ...topicKey, status: "failed", error: emsg }).catch(
+          () => {}
+        );
         topicFailed += 1;
         details.push({ step: "topic", status: "failed", error: emsg });
         warn("[TOPIC] ❌ Failed:", emsg);
@@ -277,15 +370,15 @@ async function runBirthdaysToday7am(context, opts = {}) {
   }
 
   // ---------- PERSONAL ----------
-  const mobiles = people.map(p => safeStr(p.mobileNo)).filter(Boolean);
+  const mobiles = people.map((p) => safeStr(p.mobileNo)).filter(Boolean);
   const logins = mobiles.length
     ? await Login.find({ mobile: { $in: mobiles } }, { mobile: 1, fcmToken: 1 }).lean()
     : [];
 
-  const tokenMap = new Map(logins.map(l => [safeStr(l.mobile), safeStr(l.fcmToken)]));
-  const loginMobileSet = new Set(logins.map(l => safeStr(l.mobile)));
+  const tokenMap = new Map(logins.map((l) => [safeStr(l.mobile), safeStr(l.fcmToken)]));
+  const loginMobileSet = new Set(logins.map((l) => safeStr(l.mobile)));
 
-  const missingInLogin = mobiles.filter(m => !loginMobileSet.has(m));
+  const missingInLogin = mobiles.filter((m) => !loginMobileSet.has(m));
   if (missingInLogin.length) {
     warn("Mobiles missing in Login (no token possible):", missingInLogin.join(", "));
     details.push({ step: "personal", status: "missing_login_rows", mobiles: missingInLogin });
@@ -320,7 +413,8 @@ async function runBirthdaysToday7am(context, opts = {}) {
       continue;
     }
 
-    const displayName = p.initiationName || p.name || "Devotee";
+    // ✅ IMPORTANT: use p.name (already formatted with Prabhuji/Mataji for devotees)
+    const displayName = safeStr(p.name) || "Devotee";
     const title = "Hare Krishna 🙏";
     const body = `Happy Birthday ${displayName}! 🎂`;
 
@@ -377,7 +471,8 @@ async function runBirthdaysToday7am(context, opts = {}) {
 }
 
 app.timer("birthdaysToday7am", {
-  schedule: "0 0 3 * * *", // 7:00 AM IST (00:30 UTC) - keep as you need
+  // 7:00 AM IST = 01:30 UTC
+  schedule: "0 30 1 * * *",
   handler: async (_timer, context) => runBirthdaysToday7am(context),
 });
 
