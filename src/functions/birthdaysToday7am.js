@@ -12,6 +12,21 @@ function safeStr(s) {
   return String(s || "").trim();
 }
 
+function hasText(s) {
+  return safeStr(s).length > 0;
+}
+
+function shouldUseInitiatedName(p) {
+  // use initiation name only if isInitiated === true OR initiationName is non-empty
+  return p?.isInitiated === true || hasText(p?.initiationName);
+}
+
+function buildInitiatedName(p) {
+  if (!shouldUseInitiatedName(p)) return "";
+  const init = `${safeStr(p?.initiationName)} ${safeStr(p?.initiationTitle)}`.trim();
+  return hasText(init) ? init : "";
+}
+
 function monthDayKeyFromDate(d) {
   if (!d) return "";
   const ymd = istYmd(new Date(d)); // IST aligned YYYY-MM-DD
@@ -30,7 +45,7 @@ function formatNames(people, limit = 8) {
 
 // Devotee display name (adds Prabhuji/Mataji based on gender)
 function pickDisplayName(p) {
-  const init = `${safeStr(p?.initiationName)} ${safeStr(p?.initiationTitle)}`.trim();
+  const init = buildInitiatedName(p);
   const base = init || safeStr(p?.name) || "Devotee";
 
   const g = safeStr(p?.gender).toLowerCase();
@@ -42,7 +57,7 @@ function pickDisplayName(p) {
 
 // Spouse/Child display name (NO Prabhuji/Mataji)
 function pickFamilyDisplayName(p) {
-  const init = `${safeStr(p?.initiationName)} ${safeStr(p?.initiationTitle)}`.trim();
+  const init = buildInitiatedName(p);
   return init || safeStr(p?.name) || "Devotee";
 }
 
@@ -146,7 +161,7 @@ async function runBirthdaysToday7am(context, opts = {}) {
 
   const admin = await getAdmin();
 
-  // pull full fields needed for spouse/children logic
+  // ✅ include isInitiated + initiationTitle (needed for initiation logic)
   const devotees = await Devotee.find(
     { dateOfBirth: { $ne: null } },
     {
@@ -154,6 +169,7 @@ async function runBirthdaysToday7am(context, opts = {}) {
       gender: 1,
       mobileNo: 1,
       dateOfBirth: 1,
+      isInitiated: 1,
       initiationName: 1,
       initiationTitle: 1,
       spouseDetails: 1,
@@ -173,8 +189,8 @@ async function runBirthdaysToday7am(context, opts = {}) {
 
   const norm = (s = "") => String(s).trim().toLowerCase();
 
-  const buildInitiatedName = (x) =>
-    `${x?.initiationName || ""} ${x?.initiationTitle || ""}`.trim();
+  // ✅ uses initiation only when allowed
+  const buildInitiatedNameForAny = (x) => buildInitiatedName(x);
 
   // Build lookup maps of real devotees (to detect spouse/child already exists)
   const devoteeByMobile = new Map();
@@ -184,7 +200,7 @@ async function runBirthdaysToday7am(context, opts = {}) {
     const m = safeStr(d.mobileNo);
     const dobYmd = toYmd(d.dateOfBirth);
     const n1 = norm(d.name);
-    const n2 = norm(buildInitiatedName(d));
+    const n2 = norm(buildInitiatedNameForAny(d));
 
     if (m) devoteeByMobile.set(m, d);
 
@@ -224,8 +240,8 @@ async function runBirthdaysToday7am(context, opts = {}) {
     if (added.has(uniqueKey)) continue;
 
     people.push({
-      name: displayName, // final display name (already has Prabhuji/Mataji)
-      initiationName: buildInitiatedName(d),
+      name: displayName,
+      initiationName: buildInitiatedName(d), // ✅ respects isInitiated/blank check
       mobileNo: safeStr(d.mobileNo),
       gender: safeStr(d.gender),
       source: "devotee",
@@ -245,8 +261,8 @@ async function runBirthdaysToday7am(context, opts = {}) {
         relation: "spouse",
         parentMobileNo: parentMobile,
         dateOfBirth: sp.dateOfBirth,
-        name: pickFamilyDisplayName(sp), // ✅ NO Prabhuji/Mataji
-        initiationName: buildInitiatedName(sp),
+        name: pickFamilyDisplayName(sp),
+        initiationName: buildInitiatedName(sp), // ✅ respects isInitiated/blank check
         mobileNo: safeStr(sp.mobileNo),
       });
     }
@@ -261,8 +277,8 @@ async function runBirthdaysToday7am(context, opts = {}) {
         relation: "child",
         parentMobileNo: parentMobile,
         dateOfBirth: c.dateOfBirth,
-        name: pickFamilyDisplayName(c), // ✅ NO Prabhuji/Mataji
-        initiationName: buildInitiatedName(c),
+        name: pickFamilyDisplayName(c),
+        initiationName: buildInitiatedName(c), // ✅ respects isInitiated/blank check
         mobileNo: safeStr(c.mobileNo),
       });
     }
@@ -285,8 +301,6 @@ async function runBirthdaysToday7am(context, opts = {}) {
   for (const fc of familyCandidates) {
     const m = safeStr(fc.mobileNo);
 
-    // If spouse/child has no mobile -> include (cannot be standalone Login user)
-    // If has mobile and exists as Devotee OR exists in Login -> skip
     const isStandaloneRegistered =
       existsAsDevotee({
         mobileNo: m,
@@ -304,7 +318,7 @@ async function runBirthdaysToday7am(context, opts = {}) {
       name: fc.name,
       initiationName: safeStr(fc.initiationName),
       mobileNo: m,
-      source: fc.relation, // "spouse" or "child"
+      source: fc.relation,
       parentMobileNo: safeStr(fc.parentMobileNo),
     });
 
@@ -355,9 +369,7 @@ async function runBirthdaysToday7am(context, opts = {}) {
         log("[TOPIC] ✅ Sent:", messageId);
       } catch (err) {
         const emsg = err?.message || String(err);
-        await NotificationLog.create({ ...topicKey, status: "failed", error: emsg }).catch(
-          () => {}
-        );
+        await NotificationLog.create({ ...topicKey, status: "failed", error: emsg }).catch(() => {});
         topicFailed += 1;
         details.push({ step: "topic", status: "failed", error: emsg });
         warn("[TOPIC] ❌ Failed:", emsg);
@@ -413,7 +425,6 @@ async function runBirthdaysToday7am(context, opts = {}) {
       continue;
     }
 
-    // ✅ IMPORTANT: use p.name (already formatted with Prabhuji/Mataji for devotees)
     const displayName = safeStr(p.name) || "Devotee";
     const title = "Hare Krishna 🙏";
     const body = `Happy Birthday ${displayName}! 🎂`;
