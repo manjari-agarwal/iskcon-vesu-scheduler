@@ -377,7 +377,7 @@ async function runBirthdaysToday7am(context, opts = {}) {
 }
 
 app.timer("birthdaysToday7am", {
-  schedule: "0 30 5 * * *", // 7:00 AM IST (00:30 UTC) - keep as you need
+  schedule: "0 0 3 * * *", // 7:00 AM IST (00:30 UTC) - keep as you need
   handler: async (_timer, context) => runBirthdaysToday7am(context),
 });
 
