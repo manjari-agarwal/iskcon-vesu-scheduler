@@ -41,6 +41,7 @@ async function sendToToken(admin, token, title, body, data = {}) {
       notification: { title, body },
       data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v ?? "")])),
       android: { notification: { channelId: "default" } },
+      apns: { payload: { aps: { sound: "default" } } }
     });
     return { ok: true, messageId };
   } catch (err) {
