@@ -11,6 +11,7 @@
   "dependencies": {
     "@azure/functions": "^4.11.0",
     "@azure/storage-blob": "^12.30.0",
+    "axios": "^1.13.5",
     "dotenv": "^17.2.3",
     "firebase-admin": "^12.1.0",
     "mongoose": "^8.6.0"
