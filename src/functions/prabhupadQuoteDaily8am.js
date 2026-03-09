@@ -54,14 +54,13 @@ async function runPrabhupadQuoteDaily8am(context) {
   const already = await NotificationLog.findOne(key).lean();
   if (already) return;
 
-  const title = "🕉️ Prabhupad Quote of the Day";
+  const title = "Prabhupad Quote of the Day";
   const body = truncateText(doc.hindiText, 140);
 
   try {
     const messageId = await sendPrabhupadQuoteTopicNotification({
       title,
       body,
-      imagePath: doc.prabhuPaadImage,
       data: { slot, date: todayYmd, lang: "hi" },
     });
 
@@ -77,7 +76,7 @@ async function runPrabhupadQuoteDaily8am(context) {
 
 app.timer("prabhupadQuoteDaily8am", {
   // 8:00 AM IST = 02:30 UTC
-  schedule: "0 30 2 * * *",
+  schedule: "0 30 5 * * *",
   handler: async (_timer, context) => runPrabhupadQuoteDaily8am(context),
 });
 

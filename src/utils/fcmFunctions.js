@@ -169,7 +169,7 @@ async function sendBhagwatamScheduledTopicNotification({ title, body, doc, data 
     return admin.messaging().send(message);
 }
 
-async function sendPrabhupadQuoteTopicNotification({ title, body, imagePath, data = {} }) {
+async function sendPrabhupadQuoteTopicNotification({ title, body,data = {} }) {
   const admin = await getAdmin();
   const imageUrl = toAbsoluteImageUrl("/metadata/PrabhuPadasQuotes/prabhupaad5.png");
 
